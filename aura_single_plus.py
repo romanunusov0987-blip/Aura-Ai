@@ -384,11 +384,27 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
     Message, BotCommand,
     KeyboardButton, ReplyKeyboardMarkup,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile,
+    BotCommandScopeDefault, BotCommandScopeAllPrivateChats,
 )
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
+
+BOT_COMMANDS: List[BotCommand] = [
+    BotCommand(command="start", description="Перезапустить бота"),
+    BotCommand(command="menu", description="Показать меню"),
+    BotCommand(command="persona", description="Выбрать персонажа"),
+    BotCommand(command="session", description="Начать разговор"),
+    BotCommand(command="checkin", description="Быстрый чек-ин"),
+    BotCommand(command="journal", description="Записи дневника"),
+    BotCommand(command="tests", description="Шкалы PHQ-9/GAD-7"),
+    BotCommand(command="resources", description="Полезные ресурсы"),
+    BotCommand(command="meditation", description="Медитации и практики"),
+    BotCommand(command="account", description="Подписка и промокоды"),
+    BotCommand(command="invite", description="Реферальная ссылка"),
+    BotCommand(command="referrals", description="Статистика по рефералам"),
+]
 
 # Главное меню (кнопки)
 MAIN_KB = ReplyKeyboardMarkup(
@@ -1061,20 +1077,9 @@ async def med_play(cb: CallbackQuery):
 # 8.10 Регистрация роутеров и команд
 # -------------------------
 async def setup_commands():
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Перезапустить бота"),
-        BotCommand(command="menu", description="Показать меню"),
-        BotCommand(command="persona", description="Выбрать персонажа"),
-        BotCommand(command="session", description="Начать разговор"),
-        BotCommand(command="checkin", description="Быстрый чек-ин"),
-        BotCommand(command="tests", description="Шкалы PHQ-9/GAD-7"),
-        BotCommand(command="journal", description="Записи дневника"),
-        BotCommand(command="resources", description="Полезные ресурсы"),
-        BotCommand(command="meditation", description="Медитации и практики"),
-        BotCommand(command="account", description="Подписка и промокоды"),
-        BotCommand(command="invite", description="Реферальная ссылка"),
-        BotCommand(command="referrals", description="Статистика по рефералам"),
-    ])
+    scopes = [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats()]
+    for scope in scopes:
+        await bot.set_my_commands(BOT_COMMANDS, scope=scope)
 
 def register_routers():
     dp.include_router(start_router)
