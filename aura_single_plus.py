@@ -50,6 +50,7 @@ DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL  = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 DEEPSEEK_MODEL     = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 REDIS_URL          = os.getenv("REDIS_URL")  # если есть — используем для антиспама/временных состояний
+CONVERSATION_HISTORY_LIMIT = int(os.getenv("CONVERSATION_HISTORY_LIMIT", "10"))
 
 # Новые настройки аудио/рефералок
 AUDIO_DIR          = os.getenv("AUDIO_DIR", os.path.join(os.path.dirname(__file__), "meditations"))
@@ -200,7 +201,7 @@ TARIFF_FAQ: List[Dict[str, str]] = [
 #    Храним: пользователей, дневник, результаты тестов, события, кэш медиа, рефералы, бонусы.
 # -------------------------
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, JSON, Boolean, select, text as sqltext, func
+from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, JSON, Boolean, select, delete, text as sqltext, func
 
 class User(Base):
     __tablename__ = "users"
@@ -218,6 +219,14 @@ class JournalEntry(Base):
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
     mood: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+    id: Mapped[int]       = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int]  = mapped_column(Integer, ForeignKey("users.id"), index=True)
+    role: Mapped[str]     = mapped_column(String, nullable=False)
+    content: Mapped[str]  = mapped_column(Text, nullable=False)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class ScaleResult(Base):
     __tablename__ = "scale_results"
@@ -646,14 +655,51 @@ async def talk(message: Message):
     # роль пользователя
     async with SessionLocal() as s:
         user = (await s.execute(select(User).where(User.tg_id == str(message.from_user.id)))).scalar_one_or_none()
+        if not user:
+            user = User(tg_id=str(message.from_user.id), username=message.from_user.username or "", persona="pro_psychologist")
+            s.add(user)
+            await s.commit()
+            await s.refresh(user)
+        else:
+            # обновим username при смене
+            if message.from_user.username and user.username != message.from_user.username:
+                user.username = message.from_user.username
+                await s.commit()
+                await s.refresh(user)
+        history_stmt = (
+            select(ConversationMessage)
+            .where(ConversationMessage.user_id == user.id)
+            .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+            .limit(CONVERSATION_HISTORY_LIMIT)
+        )
+        history = list(reversed((await s.execute(history_stmt)).scalars().all()))
     persona_key = user.persona if user else "pro_psychologist"
     system_prompt = PERSONAS[persona_key]["system"] + "\n\n" + STYLE_SYSTEM
     # запрос к «мозгу»
-    reply = await deepseek_reply([
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": message.text},
-    ])
+    messages_payload: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for item in history:
+        messages_payload.append({"role": item.role, "content": item.content})
+    messages_payload.append({"role": "user", "content": message.text})
+
+    reply = await deepseek_reply(messages_payload)
     await message.answer(reply)
+    async with SessionLocal() as s:
+        s.add_all([
+            ConversationMessage(user_id=user.id, role="user", content=message.text),
+            ConversationMessage(user_id=user.id, role="assistant", content=reply),
+        ])
+        await s.flush()
+        extra_ids = (
+            await s.execute(
+                select(ConversationMessage.id)
+                .where(ConversationMessage.user_id == user.id)
+                .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+                .offset(CONVERSATION_HISTORY_LIMIT)
+            )
+        ).scalars().all()
+        if extra_ids:
+            await s.execute(delete(ConversationMessage).where(ConversationMessage.id.in_(extra_ids)))
+        await s.commit()
     await log_event(str(message.from_user.id), "ai_reply", {"len": len(reply)})
 
 # -------------------------
