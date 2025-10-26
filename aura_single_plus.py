@@ -104,6 +104,15 @@ CRISIS_TEXT = (
     "Если хотите, составим план безопасности на ближайший час: 1) где вы, 2) кто рядом, 3) что снизит остроту на 10%?"
 )
 
+def text_matches(*variants: str):
+    """Упрощённая проверка текста сообщения с учётом регистра и пробелов."""
+    normalized = {variant.casefold() for variant in variants}
+
+    def _checker(text: Optional[str]) -> bool:
+        return bool(text) and text.strip().casefold() in normalized
+
+    return F.text.func(_checker)
+
 TARIFF_PLAN_ORDER = [
     "znakomstvo",
     "legkoe_dyhanie",
@@ -607,7 +616,27 @@ async def session_greet(message: Message):
     await message.answer("Начнём. Что сейчас важнее всего — мысль, чувство или ситуация?")
 
 @session_router.message(
-    F.text & ~F.text.in_({"🧠 Сессия","🎭 Персонаж","✅ Чек-ин","🧪 Шкалы","📝 Дневник","🆘 Ресурсы","🧘 Медитации","💳 Подписка","💌 Пригласить друга","👥 Рефералы"})
+F.text & ~F.text.in_({
+    "🧠 Сессия",
+    "🎭 Персонаж",
+    "✅ Чек-ин",
+    "🧪 Шкалы",
+    "Шкалы",
+    "шкалы",
+    "/tests",
+    "📝 Дневник",
+    "🆘 Ресурсы",
+    "Ресурсы",
+    "ресурсы",
+    "/resources",
+    "🧘 Медитации",
+    "💳 Подписка",
+    "Подписка",
+    "подписка",
+    "/account",
+    "💌 Пригласить друга",
+    "👥 Рефералы",
+})
 )
 async def talk(message: Message):
     # антиспам
@@ -717,7 +746,7 @@ def _answers_kb(prefix: str, idx: int) -> InlineKeyboardMarkup:
 # временное хранилище прогресса шкал: user_id -> {"phq":[...], "gad":[...]}
 _scale_progress: Dict[int, Dict[str, List[int]]] = {}
 
-@scales_router.message(F.text.in_({"🧪 Шкалы", "/tests"}))
+@scales_router.message(text_matches("🧪 Шкалы", "Шкалы", "/tests"))
 async def tests_menu(message: Message):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -784,7 +813,7 @@ async def gad_answer(cb: CallbackQuery):
 # -------------------------
 resources_router = Router()
 
-@resources_router.message(F.text.in_({"🆘 Ресурсы", "/resources"}))
+@resources_router.message(text_matches("🆘 Ресурсы", "Ресурсы", "/resources"))
 async def resources(message: Message):
     await message.answer(CRISIS_TEXT, disable_web_page_preview=True)
     await log_event(str(message.from_user.id), "resources_open", {})
@@ -856,7 +885,7 @@ ACCOUNT_KB = InlineKeyboardMarkup(
     ]
 )
 
-@account_router.message(F.text.in_({"💳 Подписка", "/account"}))
+@account_router.message(text_matches("💳 Подписка", "Подписка", "подписка", "/account"))
 async def account(message: Message):
     # Покажем базовую информацию + активные бонусы
     async with SessionLocal() as s:
