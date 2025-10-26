@@ -104,6 +104,87 @@ CRISIS_TEXT = (
     "Если хотите, составим план безопасности на ближайший час: 1) где вы, 2) кто рядом, 3) что снизит остроту на 10%?"
 )
 
+TARIFF_PLAN_ORDER = [
+    "znakomstvo",
+    "legkoe_dyhanie",
+    "novaya_zhizn",
+]
+
+TARIFF_PLANS: Dict[str, Dict[str, Any]] = {
+    "znakomstvo": {
+        "title": "Знакомство",
+        "monthly_price": 2900,
+        "annual_price": 31320,
+        "annual_discount": 10,
+        "limits": "до 30 запросов в сутки, 1 активный чат, 1 администратор",
+        "support": "базовая, ответ в течение 24 часов",
+        "trial": "7 дней, доступно до 10 запросов",
+        "extra_events_price": 900,
+        "addons": [
+            "расширенный трекер привычек — 500 ₽/мес",
+            "персональная подборка материалов — 700 ₽/мес",
+        ],
+    },
+    "legkoe_dyhanie": {
+        "title": "Лёгкое дыхание",
+        "monthly_price": 5400,
+        "annual_price": 57240,
+        "annual_discount": 12,
+        "limits": "до 80 запросов в сутки, 3 активных чата, 2 администратора",
+        "support": "приоритетная, ответ в течение 12 часов",
+        "trial": "10 дней, доступно до 25 запросов",
+        "extra_events_price": 750,
+        "addons": [
+            "групповая терапия онлайн — 1 200 ₽/мес",
+            "расширенный аналитический отчёт — 900 ₽/мес",
+        ],
+    },
+    "novaya_zhizn": {
+        "title": "Новая жизнь",
+        "monthly_price": 9800,
+        "annual_price": 100800,
+        "annual_discount": 14,
+        "limits": "до 200 запросов в сутки, 6 активных чатов, 4 администратора",
+        "support": "премиум, ответ в течение 4 часов, личный куратор",
+        "trial": "14 дней, доступно до 50 запросов",
+        "extra_events_price": 600,
+        "addons": [
+            "индивидуальные консультации — 2 500 ₽ за сессию",
+            "офлайн-ретрит раз в квартал — 9 000 ₽",
+            "расширенный семейный пакет (+2 администратора) — 1 400 ₽/мес",
+        ],
+    },
+}
+
+TARIFF_RATIONALE = (
+    "Диапазон цен отражает постепенное расширение функциональности и поддержки, соответствуя ожиданиям женщин 23–50 лет: "
+    "от знакомства с сервисом до комплексной трансформационной программы. Годовые планы со скидками мотивируют к долгосрочному "
+    "использованию и покрывают персональную поддержку и дополнительные сервисы."
+)
+
+TARIFF_FAQ: List[Dict[str, str]] = [
+    {
+        "q": "Можно ли сменить тариф?",
+        "a": "Да, переход между тарифами доступен в любой момент, а неиспользованный остаток учитывается в следующем платеже.",
+    },
+    {
+        "q": "Что считается событием?",
+        "a": "Любое взаимодействие: сообщение, запрос, загрузка материала или использование инструмента.",
+    },
+    {
+        "q": "Есть ли семейный доступ?",
+        "a": "Да, в тарифе «Новая жизнь» доступен аддон «расширенный семейный пакет» с дополнительными администраторами.",
+    },
+    {
+        "q": "Можно ли оформить рассрочку на год?",
+        "a": "Да, годовой план оплачивается в три равных платежа без процентов.",
+    },
+    {
+        "q": "Как работает пробный период?",
+        "a": "Во время пробного периода действует заявленный лимит запросов; после превышения нужно выбрать тариф или оплатить доп. события.",
+    },
+]
+
 # -------------------------
 # 3) БАЗА ДАННЫХ (SQLite по умолчанию)
 #    Храним: пользователей, дневник, результаты тестов, события, кэш медиа, рефералы, бонусы.
@@ -697,13 +778,65 @@ async def resources(message: Message):
 # -------------------------
 account_router = Router()
 
+def format_rub(amount: int) -> str:
+    return f"{amount:,} ₽".replace(",", " ")
+
+def build_tariff_overview() -> str:
+    lines: List[str] = ["💳 *Тарифы Aura*", ""]
+    for code in TARIFF_PLAN_ORDER:
+        plan = TARIFF_PLANS[code]
+        lines.append(
+            f"*{plan['title']}* — {format_rub(plan['monthly_price'])}/мес или "
+            f"{format_rub(plan['annual_price'])}/год (скидка {plan['annual_discount']}%)"
+        )
+        lines.append(f"Лимиты: {plan['limits']}.")
+        lines.append(f"Поддержка: {plan['support']}.")
+        lines.append(f"Пробный период: {plan['trial']}.")
+        lines.append(
+            f"Ставка за доп. 1000 событий: {format_rub(plan['extra_events_price'])}."
+        )
+        lines.append("Аддоны:")
+        for addon in plan["addons"]:
+            lines.append(f"• {addon}")
+        lines.append("")
+    lines.append(f"*Почему такие цены?* {TARIFF_RATIONALE}")
+    return "\n".join(lines).strip()
+
+def build_tariff_faq() -> str:
+    lines: List[str] = ["❓ *FAQ по тарифам*", ""]
+    for idx, item in enumerate(TARIFF_FAQ, start=1):
+        lines.append(f"{idx}. *{item['q']}* {item['a']}")
+    return "\n".join(lines).strip()
+
 ACCOUNT_KB = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="Опора (RUB)",    callback_data="pay:opora:rub"),
-         InlineKeyboardButton(text="Balance+ (RUB)", callback_data="pay:balance:rub")],
-        [InlineKeyboardButton(text="SOS-пакет (RUB)", callback_data="pay:sos:rub")],
-        [InlineKeyboardButton(text="Опора (USDT)",    callback_data="pay:opora:usdt"),
-         InlineKeyboardButton(text="Balance+ (USDT)", callback_data="pay:balance:usdt")],
+        [
+            InlineKeyboardButton(
+                text="Знакомство · Месяц", callback_data="pay:znakomstvo:month"
+            ),
+            InlineKeyboardButton(
+                text="Знакомство · Год (-10%)", callback_data="pay:znakomstvo:annual"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Лёгкое дыхание · Месяц",
+                callback_data="pay:legkoe_dyhanie:month",
+            ),
+            InlineKeyboardButton(
+                text="Лёгкое дыхание · Год (-12%)",
+                callback_data="pay:legkoe_dyhanie:annual",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Новая жизнь · Месяц", callback_data="pay:novaya_zhizn:month"
+            ),
+            InlineKeyboardButton(
+                text="Новая жизнь · Год (-14%)",
+                callback_data="pay:novaya_zhizn:annual",
+            ),
+        ],
     ]
 )
 
@@ -732,20 +865,45 @@ async def account(message: Message):
         "Ваши планы и бонусы.\n"
         f"Активных бонусных дней: *{active_days}*\n"
         f"Ожидают бонуса (после оплаты друзей): *{pending_paid}*\n\n"
-        "Выберите план ⤵️"
+        "Выберите план и изучите подробности ниже ⤵️"
     )
     await message.answer(text, reply_markup=ACCOUNT_KB)
+    await message.answer(build_tariff_overview())
+    await message.answer(build_tariff_faq())
 
 @account_router.callback_query(F.data.startswith("pay:"))
 async def pay(cb: CallbackQuery):
-    _, plan, currency = cb.data.split(":")
-    # демо-ссылки — замените на реальные платёжные ссылки при интеграции
-    url = "https://pay.yookassa.ru/demo" if currency == "rub" else "https://t.me/CryptoBot?start=invoice-demo"
-    await cb.message.edit_text(f"Счёт создан. Перейдите по ссылке для оплаты: {url}")
-    await log_event(str(cb.from_user.id), "payment_created", {"plan": plan, "currency": currency})
+    _, plan_code, period = cb.data.split(":")
+    plan = TARIFF_PLANS.get(plan_code)
+    if not plan:
+        await cb.answer("План не найден", show_alert=True)
+        return
+    if period not in {"month", "annual"}:
+        await cb.answer("Период не поддерживается", show_alert=True)
+        return
+
+    price = plan["monthly_price"] if period == "month" else plan["annual_price"]
+    descriptor = "месячный" if period == "month" else "годовой"
+    discount_note = (
+        f" (скидка {plan['annual_discount']}%)" if period == "annual" else ""
+    )
+
+    # демо-ссылка — замените на реальную при боевой интеграции
+    url = "https://pay.yookassa.ru/demo"
+    message_text = (
+        f"Счёт на {descriptor} тариф «{plan['title']}» — {format_rub(price)}{discount_note}.\n\n"
+        f"Ссылка на оплату: {url}\n"
+        "После оплаты напишите в поддержку или дождитесь автоматического подтверждения."
+    )
+    await cb.message.answer(message_text)
+    await log_event(
+        str(cb.from_user.id),
+        "payment_created",
+        {"plan": plan_code, "period": period, "price": price},
+    )
     # ДЕМО: считаем, что друг «оплатил» → активируем бонус пригласившему (если был)
     await activate_referral_reward_for_payer(cb.from_user.id)
-    await cb.answer()
+    await cb.answer("Ссылка отправлена")
 
 invite_router = Router()
 
