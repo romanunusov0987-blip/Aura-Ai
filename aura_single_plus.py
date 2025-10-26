@@ -104,6 +104,15 @@ CRISIS_TEXT = (
     "Если хотите, составим план безопасности на ближайший час: 1) где вы, 2) кто рядом, 3) что снизит остроту на 10%?"
 )
 
+def text_matches(*variants: str):
+    """Упрощённая проверка текста сообщения с учётом регистра и пробелов."""
+    normalized = {variant.casefold() for variant in variants}
+
+    def _checker(text: Optional[str]) -> bool:
+        return bool(text) and text.strip().casefold() in normalized
+
+    return F.text.func(_checker)
+
 TARIFF_PLAN_ORDER = [
     "znakomstvo",
     "legkoe_dyhanie",
@@ -607,7 +616,27 @@ async def session_greet(message: Message):
     await message.answer("Начнём. Что сейчас важнее всего — мысль, чувство или ситуация?")
 
 @session_router.message(
-    F.text & ~F.text.in_({"🧠 Сессия","🎭 Персонаж","✅ Чек-ин","🧪 Шкалы","📝 Дневник","🆘 Ресурсы","🧘 Медитации","💳 Подписка","💌 Пригласить друга","👥 Рефералы"})
+F.text & ~F.text.in_({
+    "🧠 Сессия",
+    "🎭 Персонаж",
+    "✅ Чек-ин",
+    "🧪 Шкалы",
+    "Шкалы",
+    "шкалы",
+    "/tests",
+    "📝 Дневник",
+    "🆘 Ресурсы",
+    "Ресурсы",
+    "ресурсы",
+    "/resources",
+    "🧘 Медитации",
+    "💳 Подписка",
+    "Подписка",
+    "подписка",
+    "/account",
+    "💌 Пригласить друга",
+    "👥 Рефералы",
+})
 )
 async def talk(message: Message):
     # антиспам
@@ -717,7 +746,7 @@ def _answers_kb(prefix: str, idx: int) -> InlineKeyboardMarkup:
 # временное хранилище прогресса шкал: user_id -> {"phq":[...], "gad":[...]}
 _scale_progress: Dict[int, Dict[str, List[int]]] = {}
 
-@scales_router.message(F.text.in_({"🧪 Шкалы", "/tests"}))
+@scales_router.message(text_matches("🧪 Шкалы", "Шкалы", "/tests"))
 async def tests_menu(message: Message):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -784,7 +813,7 @@ async def gad_answer(cb: CallbackQuery):
 # -------------------------
 resources_router = Router()
 
-@resources_router.message(F.text.in_({"🆘 Ресурсы", "/resources"}))
+@resources_router.message(text_matches("🆘 Ресурсы", "Ресурсы", "/resources"))
 async def resources(message: Message):
     await message.answer(CRISIS_TEXT, disable_web_page_preview=True)
     await log_event(str(message.from_user.id), "resources_open", {})
@@ -856,7 +885,54 @@ ACCOUNT_KB = InlineKeyboardMarkup(
     ]
 )
 
-@account_router.message(F.text.in_({"💳 Подписка", "/account"}))
+TARIFF_MENU_KB = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Знакомство — преимущества",
+                callback_data="tariff:znakomstvo",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Лёгкое дыхание — преимущества",
+                callback_data="tariff:legkoe_dyhanie",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="Новая жизнь — преимущества",
+                callback_data="tariff:novaya_zhizn",
+            )
+        ],
+        [
+            InlineKeyboardButton(text="FAQ по тарифам", callback_data="tariff:faq")
+        ],
+    ]
+)
+
+def build_tariff_details(plan_code: str) -> str:
+    plan = TARIFF_PLANS[plan_code]
+    lines: List[str] = [
+        f"💡 *{plan['title']}*",
+        f"{format_rub(plan['monthly_price'])}/мес · {format_rub(plan['annual_price'])}/год (скидка {plan['annual_discount']}%)",
+        "",
+        "*Что входит:*",
+        f"• Лимиты: {plan['limits']}",
+        f"• Поддержка: {plan['support']}",
+        f"• Пробный период: {plan['trial']}",
+        f"• Доп. 1000 событий: {format_rub(plan['extra_events_price'])}",
+    ]
+    if plan["addons"]:
+        lines.append("")
+        lines.append("*Дополнительные опции:*")
+        for addon in plan["addons"]:
+            lines.append(f"• {addon}")
+    lines.append("")
+    lines.append("Чтобы оформить, выберите подходящий счёт ниже ⤵️")
+    return "\n".join(lines).strip()
+
+@account_router.message(text_matches("💳 Подписка", "Подписка", "подписка", "/account"))
 async def account(message: Message):
     # Покажем базовую информацию + активные бонусы
     async with SessionLocal() as s:
@@ -881,11 +957,27 @@ async def account(message: Message):
         "Ваши планы и бонусы.\n"
         f"Активных бонусных дней: *{active_days}*\n"
         f"Ожидают бонуса (после оплаты друзей): *{pending_paid}*\n\n"
-        "Выберите план и изучите подробности ниже ⤵️"
+        "Нажмите кнопку, чтобы посмотреть преимущества тарифов ⤵️"
     )
-    await message.answer(text, reply_markup=ACCOUNT_KB)
-    await message.answer(build_tariff_overview())
-    await message.answer(build_tariff_faq())
+    await message.answer(text, reply_markup=TARIFF_MENU_KB)
+    await message.answer(
+        "Готовы выбрать? Нажмите на нужный счёт и получите ссылку на оплату ⤵️",
+        reply_markup=ACCOUNT_KB,
+    )
+
+@account_router.callback_query(F.data == "tariff:faq")
+async def tariff_faq(cb: CallbackQuery):
+    await cb.message.answer(build_tariff_faq())
+    await cb.answer()
+
+@account_router.callback_query(F.data.startswith("tariff:"))
+async def tariff_details(cb: CallbackQuery):
+    _, plan_code = cb.data.split(":", maxsplit=1)
+    if plan_code not in TARIFF_PLANS:
+        await cb.answer("Тариф не найден", show_alert=True)
+        return
+    await cb.message.answer(build_tariff_details(plan_code))
+    await cb.answer("Преимущества отправлены")
 
 @account_router.callback_query(F.data.startswith("pay:"))
 async def pay(cb: CallbackQuery):
