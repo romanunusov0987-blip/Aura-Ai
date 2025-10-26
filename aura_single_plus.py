@@ -40,6 +40,8 @@ try:
 except Exception:
     pass
 
+from db import Base, SessionLocal, init_db
+
 # -------------------------
 # 1) НАСТРОЙКИ
 # -------------------------
@@ -47,7 +49,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 DEEPSEEK_API_KEY   = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL  = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 DEEPSEEK_MODEL     = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-DATABASE_URL       = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///aura.db")  # просто, без Postgres
 REDIS_URL          = os.getenv("REDIS_URL")  # если есть — используем для антиспама/временных состояний
 
 # Новые настройки аудио/рефералок
@@ -198,15 +199,8 @@ TARIFF_FAQ: List[Dict[str, str]] = [
 # 3) БАЗА ДАННЫХ (SQLite по умолчанию)
 #    Храним: пользователей, дневник, результаты тестов, события, кэш медиа, рефералы, бонусы.
 # -------------------------
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncAttrs
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, JSON, Boolean, select, text as sqltext, func
-
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
-SessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False)
-
-class Base(AsyncAttrs, DeclarativeBase):
-    pass
 
 class User(Base):
     __tablename__ = "users"
