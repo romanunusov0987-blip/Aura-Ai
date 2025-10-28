@@ -31,7 +31,12 @@ import re
 import json
 import time
 import asyncio
-from typing import Optional, Dict, Any, List, Tuple
+import uuid
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List, Tuple, Generator
+from urllib.parse import urljoin
 
 # Попробуем прочитать .env, если установлен python-dotenv (не обязательно)
 try:
@@ -200,8 +205,33 @@ TARIFF_FAQ: List[Dict[str, str]] = [
 # 3) БАЗА ДАННЫХ (SQLite по умолчанию)
 #    Храним: пользователей, дневник, результаты тестов, события, кэш медиа, рефералы, бонусы.
 # -------------------------
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, JSON, Boolean, select, delete, text as sqltext, func
+from sqlalchemy.orm import (
+    Mapped,
+    Session,
+    declarative_base,
+    mapped_column,
+    relationship,
+    sessionmaker,
+)
+from sqlalchemy import (
+    String,
+    Integer,
+    DateTime,
+    ForeignKey,
+    Text,
+    JSON,
+    Boolean,
+    select,
+    delete,
+    text as sqltext,
+    func,
+    create_engine,
+    Column,
+)
+from sqlalchemy.dialects.postgresql import UUID
+
+from fastapi import Depends, FastAPI, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
 
 class User(Base):
     __tablename__ = "users"
@@ -253,8 +283,8 @@ class MediaCache(Base):
     file_id: Mapped[str]  = mapped_column(String)  # Telegram file_id
     created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-class Referral(Base):
-    __tablename__ = "referrals"
+class ReferralEvent(Base):
+    __tablename__ = "referral_events"
     id: Mapped[int]            = mapped_column(Integer, primary_key=True)
     code: Mapped[str]          = mapped_column(String, index=True)              # реф.код, с которым пришёл пользователь
     referrer_tg_id: Mapped[str]= mapped_column(String, index=True)              # кто пригласил
@@ -276,6 +306,560 @@ class UserBonus(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+# -------------------------
+# 3.1) РЕФЕРАЛЬНЫЙ СЕРВИС (FastAPI) — интеграция referral_app
+# -------------------------
+
+
+@dataclass(frozen=True)
+class ReferralSettings:
+    """Конфигурация встроенного реферального API."""
+
+    database_url: str = os.getenv(
+        "REFERRAL_DATABASE_URL",
+        os.getenv(
+            "REFERRAL_APP_DATABASE_URL",
+            "sqlite:///referral_program.db",
+        ),
+    )
+    referral_base_url: str = os.getenv(
+        "REFERRAL_BASE_URL",
+        "https://saas.example.com/register?code=",
+    )
+    registration_bonus: timedelta = timedelta(days=3)
+    subscription_bonus: timedelta = timedelta(days=7)
+    max_registrations_per_ip: int = int(os.getenv("MAX_REGISTRATIONS_PER_IP", "1"))
+
+    def referral_link(self, code: str) -> str:
+        """Сформировать полную реферальную ссылку."""
+
+        return urljoin(self.referral_base_url, code)
+
+
+referral_settings = ReferralSettings()
+
+# Синхронный движок и фабрика сессий для REST API рефералок
+REFERRAL_ENGINE = create_engine(referral_settings.database_url, future=True)
+ReferralSessionLocal = sessionmaker(
+    bind=REFERRAL_ENGINE, autoflush=False, autocommit=False, future=True
+)
+
+ReferralProgramBase = declarative_base()
+
+
+class ReferralProgramUser(ReferralProgramBase):
+    """Пользователь реферальной программы."""
+
+    __tablename__ = "referral_program_users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    referral_code = Column(String(32), unique=True, index=True)
+    referred_by_id = Column(
+        UUID(as_uuid=True), ForeignKey("referral_program_users.id"), nullable=True
+    )
+    subscription_end = Column(DateTime(timezone=True), nullable=True)
+    bonus_balance_days = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    referred_users = relationship(
+        "ReferralProgramReferral",
+        back_populates="referrer",
+        foreign_keys="ReferralProgramReferral.referrer_id",
+        cascade="all, delete-orphan",
+    )
+    referral_record = relationship(
+        "ReferralProgramReferral",
+        back_populates="referee",
+        foreign_keys="ReferralProgramReferral.referee_id",
+        uselist=False,
+    )
+    bonus_events = relationship(
+        "ReferralProgramBonusEvent",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class ReferralProgramReferral(ReferralProgramBase):
+    """Связь пригласившего и приглашённого пользователей."""
+
+    __tablename__ = "referral_program_referrals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    referrer_id = Column(
+        UUID(as_uuid=True), ForeignKey("referral_program_users.id"), nullable=False
+    )
+    referee_id = Column(
+        UUID(as_uuid=True), ForeignKey("referral_program_users.id"), nullable=False, unique=True
+    )
+    registration_ip = Column(String(64), nullable=True)
+    registered_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    registration_bonus_days = Column(Integer, default=0, nullable=False)
+    subscription_bonus_awarded = Column(Boolean, default=False, nullable=False)
+    subscription_bonus_days = Column(Integer, default=0, nullable=False)
+    subscription_awarded_at = Column(DateTime(timezone=True), nullable=True)
+
+    referrer = relationship(
+        "ReferralProgramUser",
+        foreign_keys=[referrer_id],
+        back_populates="referred_users",
+    )
+    referee = relationship(
+        "ReferralProgramUser",
+        foreign_keys=[referee_id],
+        back_populates="referral_record",
+    )
+    bonus_events = relationship(
+        "ReferralProgramBonusEvent",
+        back_populates="referral",
+        cascade="all, delete-orphan",
+    )
+
+
+class ReferralProgramBonusEvent(ReferralProgramBase):
+    """Учёт начисленных бонусов в реферальной программе."""
+
+    __tablename__ = "referral_program_bonus_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("referral_program_users.id"), nullable=False
+    )
+    referral_id = Column(
+        UUID(as_uuid=True), ForeignKey("referral_program_referrals.id"), nullable=True
+    )
+    event_type = Column(String(32), nullable=False)
+    days_awarded = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    user = relationship("ReferralProgramUser", back_populates="bonus_events")
+    referral = relationship(
+        "ReferralProgramReferral",
+        back_populates="bonus_events",
+    )
+
+
+def init_referral_models(engine) -> None:
+    """Создать таблицы для реферального API."""
+
+    ReferralProgramBase.metadata.create_all(bind=engine)
+
+
+def hash_password(password: str) -> str:
+    """Демо-хэш пароля (sha256)."""
+
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def generate_referral_code(session: Session) -> str:
+    """Сгенерировать уникальный реферальный код."""
+
+    while True:
+        code = uuid.uuid4().hex[:10]
+        exists = (
+            session.execute(
+                select(ReferralProgramUser).where(
+                    ReferralProgramUser.referral_code == code
+                )
+            ).scalar_one_or_none()
+            is not None
+        )
+        if not exists:
+            return code
+
+
+def get_referral_user_by_id(
+    session: Session, user_id: uuid.UUID
+) -> ReferralProgramUser | None:
+    """Получить пользователя по идентификатору."""
+
+    return session.get(ReferralProgramUser, user_id)
+
+
+def get_referral_user_by_email(
+    session: Session, email: str
+) -> ReferralProgramUser | None:
+    """Получить пользователя по email."""
+
+    return (
+        session.execute(
+            select(ReferralProgramUser).where(ReferralProgramUser.email == email)
+        ).scalar_one_or_none()
+    )
+
+
+def award_referral_bonus_days(
+    session: Session,
+    user: ReferralProgramUser,
+    days: int,
+    event_type: str,
+    referral: ReferralProgramReferral | None = None,
+) -> None:
+    """Начислить бонусные дни и обновить подписку."""
+
+    if days <= 0:
+        return
+
+    now = datetime.utcnow()
+    user.bonus_balance_days += days
+
+    if user.subscription_end and user.subscription_end > now:
+        user.subscription_end = user.subscription_end + timedelta(days=days)
+    else:
+        user.subscription_end = now + timedelta(days=days)
+
+    session.add(
+        ReferralProgramBonusEvent(
+            user=user,
+            referral=referral,
+            event_type=event_type,
+            days_awarded=days,
+        )
+    )
+
+
+def register_referral_user(
+    session: Session,
+    *,
+    email: str,
+    name: str,
+    password: str,
+    referral_code: str | None,
+    request_ip: str,
+) -> tuple[ReferralProgramUser, int, uuid.UUID | None]:
+    """Зарегистрировать пользователя и выдать бонусы."""
+
+    if get_referral_user_by_email(session, email):
+        raise ValueError("Пользователь с таким email уже существует")
+
+    user = ReferralProgramUser(
+        email=email,
+        name=name,
+        password_hash=hash_password(password),
+    )
+    session.add(user)
+    session.flush()
+
+    awarded_days = 0
+    referrer_id: uuid.UUID | None = None
+
+    if referral_code:
+        referrer = (
+            session.execute(
+                select(ReferralProgramUser).where(
+                    ReferralProgramUser.referral_code == referral_code
+                )
+            ).scalar_one_or_none()
+        )
+        if not referrer:
+            raise ValueError("Реферальный код не найден")
+
+        ip_count = session.execute(
+            select(func.count()).select_from(ReferralProgramReferral).where(
+                ReferralProgramReferral.referrer_id == referrer.id,
+                ReferralProgramReferral.registration_ip == request_ip,
+            )
+        ).scalar_one()
+        if ip_count >= referral_settings.max_registrations_per_ip:
+            raise ValueError("С данного IP уже была регистрация по этой ссылке")
+
+        user.referred_by_id = referrer.id
+
+        referral_record = ReferralProgramReferral(
+            referrer=referrer,
+            referee=user,
+            registration_ip=request_ip,
+            registration_bonus_days=int(
+                referral_settings.registration_bonus.total_seconds() // 86400
+            ),
+        )
+        session.add(referral_record)
+        session.flush()
+
+        awarded_days = referral_record.registration_bonus_days
+        referrer_id = referrer.id
+        award_referral_bonus_days(
+            session,
+            referrer,
+            referral_record.registration_bonus_days,
+            event_type="registration",
+            referral=referral_record,
+        )
+
+    return user, awarded_days, referrer_id
+
+
+def ensure_referral_code(
+    session: Session, user: ReferralProgramUser
+) -> str:
+    """Гарантировать наличие реферального кода."""
+
+    if not user.referral_code:
+        user.referral_code = generate_referral_code(session)
+    return user.referral_code
+
+
+def process_successful_subscription(
+    session: Session,
+    *,
+    subscriber: ReferralProgramUser,
+    plan_days: int,
+) -> tuple[datetime, bool, uuid.UUID | None]:
+    """Обработать успешную оплату подписки."""
+
+    now = datetime.utcnow()
+    if subscriber.subscription_end and subscriber.subscription_end > now:
+        subscriber.subscription_end = subscriber.subscription_end + timedelta(
+            days=plan_days
+        )
+    else:
+        subscriber.subscription_end = now + timedelta(days=plan_days)
+
+    referrer_awarded = False
+    referrer_id: uuid.UUID | None = None
+
+    if subscriber.referred_by_id:
+        referral_record = (
+            session.execute(
+                select(ReferralProgramReferral).where(
+                    ReferralProgramReferral.referee_id == subscriber.id
+                )
+            ).scalar_one_or_none()
+        )
+        if referral_record and not referral_record.subscription_bonus_awarded:
+            referrer = session.get(ReferralProgramUser, referral_record.referrer_id)
+            if referrer is None:
+                raise ValueError("Пригласивший пользователь не найден")
+
+            referral_record.subscription_bonus_awarded = True
+            referral_record.subscription_bonus_days = int(
+                referral_settings.subscription_bonus.total_seconds() // 86400
+            )
+            referral_record.subscription_awarded_at = now
+
+            award_referral_bonus_days(
+                session,
+                referrer,
+                referral_record.subscription_bonus_days,
+                event_type="subscription",
+                referral=referral_record,
+            )
+            referrer_awarded = True
+            referrer_id = referrer.id
+
+    return subscriber.subscription_end, referrer_awarded, referrer_id
+
+
+init_referral_models(REFERRAL_ENGINE)
+
+
+def get_referral_db() -> Generator[Session, None, None]:
+    """Dependency FastAPI: выдаёт сессию базы данных."""
+
+    session = ReferralSessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+# -------------------------
+# 3.2) FastAPI с роутами реферального сервиса
+# -------------------------
+
+referral_api = FastAPI(title="SaaS Referral Program")
+
+
+class GenerateReferralLinkRequest(BaseModel):
+    user_id: uuid.UUID = Field(
+        ..., description="Идентификатор пользователя, создающего ссылку"
+    )
+
+
+class ReferralLinkResponse(BaseModel):
+    referral_code: str
+    referral_link: str
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    name: str
+    password: str
+    referral_code: Optional[str] = Field(
+        default=None, description="Необязательный реферальный код"
+    )
+    request_ip: str = Field(
+        ..., description="IP адрес, с которого выполняется регистрация"
+    )
+
+
+class RegisterResponse(BaseModel):
+    user_id: uuid.UUID
+    awarded_days: int
+    referrer_id: Optional[uuid.UUID]
+
+
+class SubscribeRequest(BaseModel):
+    user_id: uuid.UUID
+    plan_days: int = Field(
+        ..., gt=0, description="Количество дней, которое даёт оплаченная подписка"
+    )
+
+
+class SubscribeResponse(BaseModel):
+    user_id: uuid.UUID
+    subscription_end: datetime
+    referrer_bonus_awarded: bool
+    referrer_id: Optional[uuid.UUID]
+
+
+class ReferralInfo(BaseModel):
+    referee_id: uuid.UUID
+    email: EmailStr
+    registered_at: datetime
+    registration_bonus_days: int
+    subscription_bonus_days: int
+    subscription_bonus_awarded: bool
+
+
+class MyReferralsResponse(BaseModel):
+    referrer_id: uuid.UUID
+    total_registration_days: int
+    total_subscription_days: int
+    referrals: List[ReferralInfo]
+
+
+@referral_api.post(
+    "/generate-referral-link", response_model=ReferralLinkResponse
+)
+def generate_referral_link(
+    payload: GenerateReferralLinkRequest,
+    session: Session = Depends(get_referral_db),
+) -> ReferralLinkResponse:
+    """Убедиться, что у пользователя есть код, и вернуть ссылку."""
+
+    user = get_referral_user_by_id(session, payload.user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден"
+        )
+
+    code = ensure_referral_code(session, user)
+    link = referral_settings.referral_link(code)
+    return ReferralLinkResponse(referral_code=code, referral_link=link)
+
+
+@referral_api.post(
+    "/register",
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def register_referral_user_handler(
+    payload: RegisterRequest, session: Session = Depends(get_referral_db)
+) -> RegisterResponse:
+    """Зарегистрировать пользователя и начислить бонусы."""
+
+    try:
+        user, awarded_days, referrer_id = register_referral_user(
+            session,
+            email=payload.email,
+            name=payload.name,
+            password=payload.password,
+            referral_code=payload.referral_code,
+            request_ip=payload.request_ip,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+
+    return RegisterResponse(
+        user_id=user.id, awarded_days=awarded_days, referrer_id=referrer_id
+    )
+
+
+@referral_api.post("/subscribe", response_model=SubscribeResponse)
+def subscribe_handler(
+    payload: SubscribeRequest, session: Session = Depends(get_referral_db)
+) -> SubscribeResponse:
+    """Обработать успешную оплату подписки пользователя."""
+
+    subscriber = get_referral_user_by_id(session, payload.user_id)
+    if not subscriber:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден"
+        )
+
+    subscription_end, referrer_bonus_awarded, referrer_id = (
+        process_successful_subscription(
+            session,
+            subscriber=subscriber,
+            plan_days=payload.plan_days,
+        )
+    )
+
+    return SubscribeResponse(
+        user_id=subscriber.id,
+        subscription_end=subscription_end,
+        referrer_bonus_awarded=referrer_bonus_awarded,
+        referrer_id=referrer_id,
+    )
+
+
+@referral_api.get("/my-referrals", response_model=MyReferralsResponse)
+def my_referrals(
+    user_id: uuid.UUID, session: Session = Depends(get_referral_db)
+) -> MyReferralsResponse:
+    """Вернуть список рефералов с агрегированными бонусами."""
+
+    user = get_referral_user_by_id(session, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден"
+        )
+
+    referrals = (
+        session.execute(
+            select(ReferralProgramReferral).where(
+                ReferralProgramReferral.referrer_id == user.id
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    referral_infos: List[ReferralInfo] = []
+    total_registration_days = 0
+    total_subscription_days = 0
+
+    for referral in referrals:
+        referral_infos.append(
+            ReferralInfo(
+                referee_id=referral.referee_id,
+                email=referral.referee.email,
+                registered_at=referral.registered_at,
+                registration_bonus_days=referral.registration_bonus_days,
+                subscription_bonus_days=referral.subscription_bonus_days,
+                subscription_bonus_awarded=referral.subscription_bonus_awarded,
+            )
+        )
+        total_registration_days += referral.registration_bonus_days
+        total_subscription_days += referral.subscription_bonus_days
+
+    return MyReferralsResponse(
+        referrer_id=user.id,
+        total_registration_days=total_registration_days,
+        total_subscription_days=total_subscription_days,
+        referrals=referral_infos,
+    )
 
 # -------------------------
 # 4) ПРОСТОЙ ЛОГ СОБЫТИЙ (с очисткой телефонов/e-mail)
@@ -488,9 +1072,9 @@ async def record_referral(referrer_tg_id: int, referred_tg_id: int, code: str, s
     async with SessionLocal() as s:
         # проверим, есть ли запись пары
         existing = (await s.execute(
-            select(Referral).where(
-                Referral.referrer_tg_id == str(referrer_tg_id),
-                Referral.referred_tg_id == str(referred_tg_id)
+            select(ReferralEvent).where(
+                ReferralEvent.referrer_tg_id == str(referrer_tg_id),
+                ReferralEvent.referred_tg_id == str(referred_tg_id)
             )
         )).scalar_one_or_none()
         if existing:
@@ -500,8 +1084,8 @@ async def record_referral(referrer_tg_id: int, referred_tg_id: int, code: str, s
                 existing.status = status
             await s.commit()
         else:
-            s.add(Referral(code=code, referrer_tg_id=str(referrer_tg_id),
-                           referred_tg_id=str(referred_tg_id), status=status))
+            s.add(ReferralEvent(code=code, referrer_tg_id=str(referrer_tg_id),
+                                referred_tg_id=str(referred_tg_id), status=status))
             await s.commit()
     await log_event(str(referred_tg_id), "referral_"+status, {"referrer": str(referrer_tg_id), "code": code})
 
@@ -516,10 +1100,10 @@ async def activate_referral_reward_for_payer(payer_tg_id: int):
     # Найти последнюю referral (joined/clicked) и начислить пригласившему бонус REF_BONUS_DAYS_PAID
     async with SessionLocal() as s:
         ref = (await s.execute(
-            select(Referral).where(
-                Referral.referred_tg_id == str(payer_tg_id),
-                Referral.status.in_(("joined","clicked"))
-            ).order_by(Referral.created_at.desc())
+            select(ReferralEvent).where(
+                ReferralEvent.referred_tg_id == str(payer_tg_id),
+                ReferralEvent.status.in_(("joined","clicked"))
+            ).order_by(ReferralEvent.created_at.desc())
         )).scalars().first()
         if not ref:
             return False
@@ -936,13 +1520,13 @@ async def account(message: Message):
     pending_paid = 0  # приглашённые, которые ещё не оплатили
     # Подсчитаем pending из рефералок (joined, но не paid)
     async with SessionLocal() as s:
-        joined = (await s.execute(select(Referral).where(
-            Referral.referrer_tg_id == str(message.from_user.id),
-            Referral.status.in_(("joined","clicked"))
+        joined = (await s.execute(select(ReferralEvent).where(
+            ReferralEvent.referrer_tg_id == str(message.from_user.id),
+            ReferralEvent.status.in_(("joined","clicked"))
         ))).scalars().all()
-        paid = (await s.execute(select(Referral).where(
-            Referral.referrer_tg_id == str(message.from_user.id),
-            Referral.status == "paid"
+        paid = (await s.execute(select(ReferralEvent).where(
+            ReferralEvent.referrer_tg_id == str(message.from_user.id),
+            ReferralEvent.status == "paid"
         ))).scalars().all()
         pending_paid = max(0, len(joined) - len(paid))
 
@@ -1016,16 +1600,16 @@ async def referrals(message: Message):
     link = f"https://t.me/{me.username}?start=ref{code}"
     async with SessionLocal() as s:
         total_clicked = (await s.execute(select(func.count()).select_from(
-            select(Referral).where(Referral.referrer_tg_id == str(message.from_user.id),
-                                   Referral.status == "clicked").subquery()
+            select(ReferralEvent).where(ReferralEvent.referrer_tg_id == str(message.from_user.id),
+                                        ReferralEvent.status == "clicked").subquery()
         ))).scalar_one()
         total_joined = (await s.execute(select(func.count()).select_from(
-            select(Referral).where(Referral.referrer_tg_id == str(message.from_user.id),
-                                   Referral.status.in_(("joined","paid"))).subquery()
+            select(ReferralEvent).where(ReferralEvent.referrer_tg_id == str(message.from_user.id),
+                                        ReferralEvent.status.in_(("joined","paid"))).subquery()
         ))).scalar_one()
         total_paid    = (await s.execute(select(func.count()).select_from(
-            select(Referral).where(Referral.referrer_tg_id == str(message.from_user.id),
-                                   Referral.status == "paid").subquery()
+            select(ReferralEvent).where(ReferralEvent.referrer_tg_id == str(message.from_user.id),
+                                        ReferralEvent.status == "paid").subquery()
         ))).scalar_one()
         bonuses = (await s.execute(
             select(UserBonus).where(UserBonus.user_tg_id == str(message.from_user.id))
