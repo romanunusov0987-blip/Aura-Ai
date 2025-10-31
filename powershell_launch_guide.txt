@@ -13,29 +13,18 @@ git clone https://github.com/your-account/Aura-Ai.git
 cd C:\Users\РОМА\Desktop\Aura-Ai-main
 ```
 
-## 2. Создание и активация виртуального окружения Python
+## 2. Установка зависимостей в системный Python
 ```powershell
-# Создать виртуальное окружение в папке .venv
-python -m venv .venv
+# Обновить pip и установить все зависимости проекта в профиль пользователя
+python -m pip install --user --upgrade pip
+python -m pip install --user -r requirements.txt
 
-# Активировать виртуальное окружение
-.\.venv\Scripts\Activate.ps1
+# (Опционально) добавить скрипты Python в PATH для текущей сессии
+$userScripts = "$Env:APPDATA\Python\Python311\Scripts"
+if (Test-Path $userScripts) { $Env:Path = "$userScripts;$Env:Path" }
 ```
 
-Если у вас политика выполнения скриптов не позволяет запускать Activate.ps1, разрешите запуск локальных скриптов в текущей сессии:
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
-.\.venv\Scripts\Activate.ps1
-```
-
-## 3. Установка зависимостей
-```powershell
-# Обновить pip и установить все зависимости проекта
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-## 4. Настройка переменных окружения через файл .env
+## 3. Настройка переменных окружения через файл .env
 Шаблон файла уже находится в корне проекта. Чтобы быстро заполнить ключевые поля, воспользуйтесь следующими командами (замените `***` на реальные значения):
 ```powershell
 # Открыть .env в блокноте для редактирования (или используйте любой редактор)
@@ -56,60 +45,46 @@ $Env:DEEPSEEK_API_KEY = "***"
 $Env:DATABASE_URL = "postgresql+psycopg://user:password@localhost:5432/referral_db"
 ```
 
-## 5. Создание таблиц реферального сервиса (опционально)
+## 4. Создание таблиц реферального сервиса (опционально)
 Если вы используете PostgreSQL для реферального сервиса и хотите создать таблицы заранее, выполните команду:
 ```powershell
-python -c "from referral_app.database import Base, engine; import referral_app.models; Base.metadata.create_all(bind=engine); print('Таблицы успешно созданы')"
+python -c "import asyncio; import Aura_Psycholog_bot; from db import init_db; asyncio.run(init_db())"
 ```
 
-## 6. Запуск основного Telegram-бота
+## 5. Запуск основного Telegram-бота
 ```powershell
-# Убедитесь, что активировано виртуальное окружение и заполнен .env
+# Перед запуском заполните .env необходимыми токенами
 python Aura_Psycholog_bot.py
 ```
 
 Бот будет получать обновления через Telegram API (long polling). Логи выводятся в консоль.
 
-## 7. Запуск административного бота
+## 6. Запуск административного бота
 ```powershell
 # Требуется, чтобы переменные ADMIN_TELEGRAM_BOT_TOKEN и ADMIN_USER_IDS были заданы
 python -m admin_bot
 ```
 
-## 8. Запуск реферального backend-сервиса
+## 7. Запуск реферального backend-сервиса
 ```powershell
-# Для авто-перезагрузки в режиме разработки используем uvicorn
-uvicorn referral_app.main:app --reload --host 0.0.0.0 --port 8000
+# Для авто-перезагрузки в режиме разработки используем uvicorn из текущего Python
+python -m uvicorn Aura_Psycholog_bot:referral_api --reload --host 0.0.0.0 --port 8000
 ```
 
 После запуска API документация будет доступна по адресу http://127.0.0.1:8000/docs
 
-## 9. Параллельный запуск сервисов (опционально)
+## 8. Параллельный запуск сервисов (опционально)
 Если нужно держать несколько процессов одновременно, можно использовать отдельные вкладки Windows Terminal или команды PowerShell Background Jobs:
 ```powershell
 # Пример запуска бота в фоне
-Start-Job -ScriptBlock { Set-Location "$(Get-Location)"; .\.venv\Scripts\Activate.ps1; python Aura_Psycholog_bot.py }
+Start-Job -ScriptBlock { Set-Location "$(Get-Location)"; python Aura_Psycholog_bot.py }
 
 # Пример запуска реферального API в новой вкладке Windows Terminal
-wt -w 0 nt -p "Windows PowerShell" powershell -NoExit -Command "Set-Location '$(Get-Location)'; .\.venv\Scripts\Activate.ps1; uvicorn referral_app.main:app --reload"
+wt -w 0 nt -p "Windows PowerShell" powershell -NoExit -Command "Set-Location '$(Get-Location)'; python -m uvicorn Aura_Psycholog_bot:referral_api --reload"
 ```
-
-## 10. Остановка процессов
+## 9. Остановка процессов
 ```powershell
 # Остановить фоновые джобы, если использовали Start-Job
 Get-Job | Stop-Job
 Get-Job | Remove-Job
-```
-
-## 11. Деактивация виртуального окружения
-```powershell
-# Вернуться в системный Python
-deactivate
-```
-
-На этом запуск проекта завершён. При следующем входе в каталог достаточно активировать виртуальное окружение и запустить нужные сервисы:
-```powershell
-Set-Location Aura-Ai
-.\.venv\Scripts\Activate.ps1
-python Aura_Psycholog_bot.py
 ```
