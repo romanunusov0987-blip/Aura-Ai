@@ -13,10 +13,39 @@ from sqlalchemy import (
     Integer,
     String,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.types import CHAR, TypeDecorator
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+
+class GUID(TypeDecorator):
+    """Platform-independent GUID/UUID type."""
+
+    impl = CHAR
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):  # type: ignore[override]
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        return dialect.type_descriptor(CHAR(36))
+
+    def process_bind_param(self, value, dialect):  # type: ignore[override]
+        if value is None:
+            return value
+        if dialect.name == "postgresql":
+            return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return str(uuid.UUID(str(value)))
+
+    def process_result_value(self, value, dialect):  # type: ignore[override]
+        if value is None:
+            return value
+        if isinstance(value, uuid.UUID):
+            return value
+        return uuid.UUID(str(value))
 
 
 class User(Base):
@@ -24,12 +53,12 @@ class User(Base):
 
     __tablename__ = "users"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
     password_hash = Column(String(255), nullable=False)
     referral_code = Column(String(32), unique=True, index=True)
-    referred_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    referred_by_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
     subscription_end = Column(DateTime(timezone=True), nullable=True)
     bonus_balance_days = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
@@ -54,9 +83,9 @@ class Referral(Base):
 
     __tablename__ = "referrals"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    referrer_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    referee_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, unique=True)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    referrer_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    referee_id = Column(GUID(), ForeignKey("users.id"), nullable=False, unique=True)
     registration_ip = Column(String(64), nullable=True)
     registered_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     registration_bonus_days = Column(Integer, default=0, nullable=False)
@@ -74,9 +103,9 @@ class BonusEvent(Base):
 
     __tablename__ = "bonus_events"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    referral_id = Column(UUID(as_uuid=True), ForeignKey("referrals.id"), nullable=True)
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    referral_id = Column(GUID(), ForeignKey("referrals.id"), nullable=True)
     event_type = Column(String(32), nullable=False)
     days_awarded = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
