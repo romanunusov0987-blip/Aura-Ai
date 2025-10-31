@@ -10,7 +10,7 @@
 git clone https://github.com/your-account/Aura-Ai.git
 
 # Перейти в папку проекта
-cd "C:\Users\РОМА\Desktop\Aura-Ai-main"
+cd C:\Users\РОМА\Desktop\Aura-Ai-main
 ```
 
 ## 2. Создание и активация виртуального окружения Python
