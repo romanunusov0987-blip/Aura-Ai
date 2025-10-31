@@ -130,6 +130,33 @@ Backend-реализация строится вокруг FastAPI и PostgreSQL
 2. Установите зависимости: `pip install -r requirements.txt`.
 3. Запустите бота: `python Aura_Psycholog_bot.py`.
 
+## Быстрый цикл разработки и тестирования
+
+### 1. Общая настройка окружения (один раз)
+1. Создайте виртуальное окружение: `python -m venv .venv`.
+2. Активируйте его.
+   - macOS/Linux: `source .venv/bin/activate`
+   - Windows PowerShell: `.\.venv\Scripts\Activate.ps1`
+3. Обновите менеджер пакетов: `python -m pip install --upgrade pip`.
+4. Установите зависимости проекта: `pip install -r requirements.txt`.
+
+### 2. Быстрый перезапуск основного Telegram-бота
+1. Перед стартом заполните `.env` (минимум `TELEGRAM_BOT_TOKEN`).
+2. Запускайте бота командой `python Aura_Psycholog_bot.py`.
+3. После правок прерывайте текущий процесс сочетанием `Ctrl+C` и немедленно перезапускайте ту же команду.
+4. Чтобы ускорить отладку конкретных сценариев, временно снижайте глубину памяти: `CONVERSATION_HISTORY_LIMIT=2 python Aura_Psycholog_bot.py` (macOS/Linux) или `set CONVERSATION_HISTORY_LIMIT=2; python Aura_Psycholog_bot.py` (PowerShell).
+
+### 3. Быстрая проверка административного бота
+1. Убедитесь, что в `.env` заданы `ADMIN_TELEGRAM_BOT_TOKEN` и список `ADMIN_USER_IDS`.
+2. Запускайте панель администрирования в том же окружении: `python -m admin_bot`.
+3. Перезапускайте после правок так же, как основной бот (`Ctrl+C`, затем повторный запуск).
+
+### 4. Горячий перезапуск реферального сервиса
+1. Проверьте переменную `DATABASE_URL`: по умолчанию используется PostgreSQL (`postgresql+psycopg2://postgres:postgres@localhost:5432/referral_db`), но для локальных экспериментов можно временно указать SQLite (`sqlite:///referral_dev.db`).
+2. Запускайте API с авто-перезагрузкой: `uvicorn referral_app.main:app --reload`.
+3. После изменения моделей примените миграции (например, через Alembic) или удалите временную тестовую базу, чтобы пересоздать таблицы.
+4. Документация в браузере доступна по адресу `http://127.0.0.1:8000/docs`.
+
 ## Административный бот с панелью управления
 Базовый административный бот расположен в каталоге `admin_bot/` и использует ту же виртуальную среду, что и основной проект.
 
