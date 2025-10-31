@@ -12,7 +12,7 @@ class Settings:
 
     database_url: str = os.getenv(
         "DATABASE_URL",
-        "postgresql+psycopg2://postgres:postgres@localhost:5432/referral_db",
+        "sqlite:///referral_app.db",
     )
     referral_base_url: str = os.getenv(
         "REFERRAL_BASE_URL", "https://saas.example.com/register?code="

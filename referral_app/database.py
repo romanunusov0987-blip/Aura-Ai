@@ -9,7 +9,11 @@ from .config import settings
 # Lazily create a SQLAlchemy engine that talks to PostgreSQL.  The same code will
 # also work with SQLite (handy for local development) because SQLAlchemy hides
 # the vendor specific details.
-engine = create_engine(settings.database_url, future=True)
+engine_kwargs = {"future": True}
+if settings.database_url.startswith("sqlite"):
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+engine = create_engine(settings.database_url, **engine_kwargs)
 
 # The session factory is used across the application when a database session is
 # required.  Using autoflush/autocommit disabled keeps transaction control in the
