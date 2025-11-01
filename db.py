@@ -1,9 +1,16 @@
 """Утилиты для работы с базой данных проекта Aura."""
 from __future__ import annotations
 
+import importlib.util
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
+
+if importlib.util.find_spec("sqlalchemy") is None:
+    raise ModuleNotFoundError(
+        "Модуль SQLAlchemy не найден. Установите зависимости проекта командой "
+        "'pip install -r requirements.txt' перед запуском."
+    )
 
 from sqlalchemy.ext.asyncio import (
     AsyncAttrs,
